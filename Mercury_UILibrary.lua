@@ -1,7 +1,7 @@
 --[[
 
     Mercury UILibrary — macOS Edition
-    edited: 11/26
+    edited: 16/26
     developers: Ness
 
     Upgrades vs. original:
