@@ -1,7 +1,7 @@
 --[[
 
     Mercury UILibrary — macOS Edition
-    edited: 16/26
+    edited: 17/26
     developers: Ness
 
     Upgrades vs. original:
@@ -1773,21 +1773,33 @@ local function buildRow(parent, options, height)
         Theme = { BackgroundColor3 = "Secondary" },
         BackgroundTransparency = 0.4,
         Size = UDim2.new(1, 0, 0, height or ROW_HEIGHT),
-        AutoButtonColor = false
+        AutoButtonColor = false,
+        Text = "",                  -- so the inherited Text field doesn't render
+        ClipsDescendants = true     -- crop overflow cleanly instead of bleeding out
     }):round(8)
+
+    -- Reserve a right-side region of the row for the control (toggle
+    -- pill, slider value box, dropdown chevron, textbox, etc). Using a
+    -- fixed offset instead of a percentage means the text area shrinks
+    -- but the *title* never gets clipped to invisibility when the
+    -- window is resized narrow. 120 fits every standard control —
+    -- textboxes are capped at MAX_W=180 below so they never overlap.
+    local TITLE_RIGHT_PAD = 140
+    local DESC_RIGHT_PAD  = 140
 
     local title = row:object("TextLabel", {
         BackgroundTransparency = 1,
         Position = UDim2.fromOffset(14, options.Description and 10 or 0),
         Size = options.Description
-            and UDim2.new(0.55, -14, 0, 18)
-            or UDim2.new(0.55, -14, 1, 0),
+            and UDim2.new(1, -(14 + TITLE_RIGHT_PAD), 0, 18)
+            or UDim2.new(1, -(14 + TITLE_RIGHT_PAD), 1, 0),
         Text = options.Name or "Item",
         TextSize = 15,
         Font = Enum.Font.GothamMedium,
         Theme = { TextColor3 = "StrongText" },
         TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Center
+        TextYAlignment = Enum.TextYAlignment.Center,
+        TextTruncate = Enum.TextTruncate.AtEnd     -- "…" when too long
     })
 
     local description
@@ -1795,12 +1807,13 @@ local function buildRow(parent, options, height)
         description = row:object("TextLabel", {
             BackgroundTransparency = 1,
             Position = UDim2.fromOffset(14, 30),
-            Size = UDim2.new(0.6, -14, 0, 16),
+            Size = UDim2.new(1, -(14 + DESC_RIGHT_PAD), 0, 16),
             Text = options.Description,
             TextSize = 12,
             Font = Enum.Font.Gotham,
             Theme = { TextColor3 = {"WeakText", 5} },
-            TextXAlignment = Enum.TextXAlignment.Left
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd
         })
     end
 
@@ -2312,10 +2325,33 @@ function Library:textbox(options)
 
     local row = buildRow(self.container, options)
 
+    -- Compute a width that fits the placeholder comfortably so the
+    -- hint "https://www.roblox.com" (and similar) is fully visible
+    -- when the box is empty. We pick the larger of:
+    --   • a minimum (110 desktop / 130 mobile so the box doesn't
+    --     shrink to nothing on empty Placeholder)
+    --   • the actual rendered width of the placeholder + padding
+    --   • a maximum cap so it doesn't push the row text off-screen
+    local TS = game:GetService("TextService")
+    local MIN_W   = IsMobile and 130 or 110
+    local MAX_W   = 200
+    local SIDE_PAD = 18    -- 8 left + 8 right padding + small breathing room
+
+    local computedW = MIN_W
+    pcall(function()
+        local size = TS:GetTextSize(
+            options.Placeholder or "",
+            12,
+            Enum.Font.GothamMedium,
+            Vector2.new(10000, 100)
+        )
+        computedW = math.max(MIN_W, math.min(MAX_W, math.ceil(size.X) + SIDE_PAD))
+    end)
+
     local input = row:object("TextBox", {
         AnchorPoint = Vector2.new(1, 0.5),
         Position = UDim2.new(1, -14, 0.5, 0),
-        Size = UDim2.fromOffset(IsMobile and 130 or 110, 26),
+        Size = UDim2.fromOffset(computedW, 26),
         Theme = {
             BackgroundColor3 = {"Secondary", 15},
             TextColor3 = "StrongText"
@@ -2326,6 +2362,7 @@ function Library:textbox(options)
         TextSize = 12,
         ClearTextOnFocus = false,
         TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
         ClipsDescendants = true
     }):round(6):stroke({"Secondary", 25}, 1)
 
