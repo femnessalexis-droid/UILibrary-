@@ -6,11 +6,19 @@
 
     Upgrades vs. original:
       • Full macOS-style redesign (sidebar layout, traffic lights, refined typography)
+      • Browser-style title bar (Fluorine-Hub inspired): sidebar toggle,
+        back / forward navigation arrows, stacked Title + Subtitle, and a
+        live search box that filters the sidebar tabs as you type
+      • Traffic lights now reveal ✕ / – / + glyphs on hover (Sonoma style)
+      • Collapsible sidebar — the panel button slides it away to reclaim space
+      • New "Subtitle"/"Author" window options (e.g. Author = "ALLNIGHT"
+        renders "Made by ALLNIGHT" under the title)
       • New default "MacOS" theme (dark, indigo accent) — legacy themes preserved
       • Drag-to-resize handle in the bottom-right corner
       • Minimize via the yellow traffic light, full-screen toggle via the green one
       • Full mobile support: unified touch+mouse drag, larger touch targets,
-        numeric TextBox for sliders so they work without a mouse
+        numeric TextBox for sliders so they work without a mouse,
+        responsive title bar (search hides on narrow windows)
       • Tab categories (e.g. "Main", "Settings") in the sidebar
       • Same public API as the original — drop-in replacement.
 
@@ -247,6 +255,7 @@ Library.__index = Library
 local selectedTab
 Library._promptExists      = false
 Library._colorPickerExists = false
+Library._navigating        = false   -- true while back/forward arrows retrace history
 
 local GlobalTweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
@@ -661,6 +670,8 @@ function Library:create(options)
         ToggleButtonText  = nil,   -- string shown inside the floating button
         ToggleButtonIcon  = nil,   -- rbxassetid; takes precedence over text
         AlwaysShowToggleButton = false, -- force visible on desktop too
+        Subtitle          = nil,   -- second line under the title (e.g. "Made by …")
+        Author            = nil,   -- shorthand: becomes "Made by <Author>" if Subtitle unset
     }, options)
 
     if getgenv and getgenv().MercuryUI then
@@ -760,7 +771,19 @@ function Library:create(options)
 
     -- =================================================================
     --                          TITLE BAR
+    --   Browser-style toolbar:  ●●●   ▣  ‹ ›   Title / Subtitle   🔍 Search
+    --   (traffic lights · sidebar toggle · nav arrows · titles · search)
     -- =================================================================
+
+    local TITLE_BAR_HEIGHT = 52
+
+    -- Resolve the subtitle once. Either an explicit string, or built from
+    -- a short Author name → "Made by <Author>".
+    local subtitleStr = options.Subtitle
+    if (not subtitleStr or subtitleStr == "") and options.Author then
+        subtitleStr = "Made by " .. tostring(options.Author)
+    end
+    local hasSubtitle = subtitleStr ~= nil and subtitleStr ~= ""
 
     -- titleBar must be a Button (not a plain Frame) so that on mobile
     -- it absorbs touch events before they reach Roblox's camera
@@ -768,7 +791,7 @@ function Library:create(options)
     -- camera, regardless of any ContextActionService sinking.
     local titleBar = core:object("TextButton", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 38),
+        Size = UDim2.new(1, 0, 0, TITLE_BAR_HEIGHT),
         Text = "",
         AutoButtonColor = false,
         Active = true,
@@ -777,9 +800,9 @@ function Library:create(options)
 
     -- subtle separator below the title bar
     local titleSep = core:object("Frame", {
-        Theme = { BackgroundColor3 = {"Secondary", 5} },
-        BackgroundTransparency = 0.4,
-        Position = UDim2.new(0, 0, 0, 38),
+        Theme = { BackgroundColor3 = {"Secondary", 6} },
+        BackgroundTransparency = 0.45,
+        Position = UDim2.new(0, 0, 0, TITLE_BAR_HEIGHT),
         Size = UDim2.new(1, 0, 0, 1),
         ZIndex = 3
     })
@@ -787,8 +810,8 @@ function Library:create(options)
     -- ----- Traffic lights ----------------------------------------------
     local lightHolder = titleBar:object("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(14, 0),
-        Size = UDim2.new(0, 70, 1, 0),
+        Position = UDim2.fromOffset(16, 0),
+        Size = UDim2.new(0, 66, 1, 0),
         ZIndex = 4
     })
     lightHolder:object("UIListLayout", {
@@ -798,41 +821,213 @@ function Library:create(options)
         SortOrder = Enum.SortOrder.LayoutOrder
     })
 
-    local function makeLight(color, hover, layoutOrder)
+    -- macOS-style: each light reveals a faint glyph (✕ – +) on hover.
+    local function makeLight(color, hover, layoutOrder, glyph)
         local btn = lightHolder:object("ImageButton", {
             BackgroundColor3 = color,
-            Size = UDim2.fromOffset(13, 13),
+            Size = UDim2.fromOffset(12, 12),
             AnchorPoint = Vector2.new(0, 0.5),
             LayoutOrder = layoutOrder,
             AutoButtonColor = false,
             ZIndex = 5
         }):round(100)
 
+        local sym = btn:object("TextLabel", {
+            BackgroundTransparency = 1,
+            Size = UDim2.fromScale(1, 1),
+            Text = glyph,
+            Font = Enum.Font.GothamBold,
+            TextSize = 9,
+            TextColor3 = Color3.fromRGB(35, 25, 0),
+            TextTransparency = 1,
+            ZIndex = 6
+        })
+
         btn.MouseEnter:Connect(function()
             btn:tween{BackgroundColor3 = hover, Length = 0.1}
+            sym:tween{TextTransparency = 0.25, Length = 0.1}
         end)
         btn.MouseLeave:Connect(function()
             btn:tween{BackgroundColor3 = color, Length = 0.1}
+            sym:tween{TextTransparency = 1, Length = 0.1}
         end)
         return btn
     end
 
-    local redLight    = makeLight(Color3.fromRGB(255, 95, 86),  Color3.fromRGB(255, 130, 120), 1)
-    local yellowLight = makeLight(Color3.fromRGB(255, 189, 46), Color3.fromRGB(255, 210, 100), 2)
-    local greenLight  = makeLight(Color3.fromRGB(39, 201, 63),  Color3.fromRGB(80, 220, 100),  3)
+    local redLight    = makeLight(Color3.fromRGB(255, 95, 86),  Color3.fromRGB(255, 99, 92),  1, "✕")
+    local yellowLight = makeLight(Color3.fromRGB(255, 189, 46), Color3.fromRGB(255, 191, 49), 2, "–")
+    local greenLight  = makeLight(Color3.fromRGB(39, 201, 63),  Color3.fromRGB(40, 200, 64),  3, "+")
 
-    -- ----- Title text (centered) ---------------------------------------
-    local titleText = titleBar:object("TextLabel", {
+    -- ----- Toolbar group: sidebar toggle + nav arrows ------------------
+    local toolbar = titleBar:object("Frame", {
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, -200, 1, 0),
-        Position = UDim2.new(0.5, 0, 0, 0),
-        AnchorPoint = Vector2.new(0.5, 0),
-        Text = options.Name,
-        Theme = { TextColor3 = {"WeakText", 10} },
-        TextSize = 13,
-        Font = Enum.Font.GothamMedium,
+        Position = UDim2.fromOffset(88, 0),
+        Size = UDim2.new(0, 96, 1, 0),
         ZIndex = 4
     })
+    toolbar:object("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        Padding = UDim.new(0, 4),
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        SortOrder = Enum.SortOrder.LayoutOrder
+    })
+
+    -- A reusable "ghost" toolbar button: invisible until hovered.
+    local function makeToolButton(layoutOrder)
+        local b = toolbar:object("TextButton", {
+            BackgroundTransparency = 1,
+            Theme = { BackgroundColor3 = {"Secondary", 14} },
+            Size = UDim2.fromOffset(28, 28),
+            AnchorPoint = Vector2.new(0, 0.5),
+            LayoutOrder = layoutOrder,
+            AutoButtonColor = false,
+            Text = "",
+            ZIndex = 5
+        }):round(7)
+        b.MouseEnter:Connect(function() b:tween{BackgroundTransparency = 0.5, Length = 0.1} end)
+        b.MouseLeave:Connect(function() b:tween{BackgroundTransparency = 1,   Length = 0.1} end)
+        return b
+    end
+
+    -- Sidebar toggle — a small panel glyph drawn from frames so it tints
+    -- cleanly with the theme (no font-glyph guessing).
+    local sidebarToggleBtn = makeToolButton(1)
+    do
+        local box = sidebarToggleBtn:object("Frame", {
+            Centered = true,
+            BackgroundTransparency = 1,
+            Size = UDim2.fromOffset(15, 13),
+            ZIndex = 6
+        }):round(3):stroke({"WeakText", 4}, 1.5)
+        box:object("Frame", {
+            Position = UDim2.fromOffset(5, 0),
+            Size = UDim2.new(0, 1, 1, 0),
+            Theme = { BackgroundColor3 = {"WeakText", 4} },
+            ZIndex = 6
+        })
+    end
+
+    -- Back / forward navigation arrows
+    local backBtn = makeToolButton(2)
+    local backIcon = backBtn:object("TextLabel", {
+        BackgroundTransparency = 1,
+        Centered = true,
+        Size = UDim2.fromScale(1, 1),
+        Text = "❮",
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        Theme = { TextColor3 = {"WeakText", 4} },
+        TextTransparency = 0.7,
+        ZIndex = 6
+    })
+
+    local fwdBtn = makeToolButton(3)
+    local fwdIcon = fwdBtn:object("TextLabel", {
+        BackgroundTransparency = 1,
+        Centered = true,
+        Size = UDim2.fromScale(1, 1),
+        Text = "❯",
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        Theme = { TextColor3 = {"WeakText", 4} },
+        TextTransparency = 0.7,
+        ZIndex = 6
+    })
+
+    -- ----- App title + subtitle (left-aligned, stacked) ----------------
+    local TITLE_LEFT  = 194
+    local SEARCH_W    = IsMobile and 148 or 192
+    local titleBlock = titleBar:object("Frame", {
+        BackgroundTransparency = 1,
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, TITLE_LEFT, 0.5, 0),
+        Size = UDim2.new(1, -(TITLE_LEFT + SEARCH_W + 28), 1, 0),
+        ClipsDescendants = true,
+        ZIndex = 4
+    })
+
+    local titleText = titleBlock:object("TextLabel", {
+        BackgroundTransparency = 1,
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 0, 0.5, hasSubtitle and -9 or 0),
+        Size = UDim2.new(1, 0, 0, 18),
+        Text = options.Name,
+        Theme = { TextColor3 = "StrongText" },
+        TextSize = 15,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 4
+    })
+
+    local subtitleText
+    if hasSubtitle then
+        subtitleText = titleBlock:object("TextLabel", {
+            BackgroundTransparency = 1,
+            AnchorPoint = Vector2.new(0, 0.5),
+            Position = UDim2.new(0, 0, 0.5, 9),
+            Size = UDim2.new(1, 0, 0, 14),
+            Text = subtitleStr,
+            Theme = { TextColor3 = {"WeakText", 2} },
+            TextSize = 11,
+            Font = Enum.Font.GothamMedium,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Center,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            ZIndex = 4
+        })
+    end
+
+    -- ----- Search box (right) ------------------------------------------
+    --   Filters the sidebar tabs live as you type.
+    local searchHolder = titleBar:object("Frame", {
+        Theme = { BackgroundColor3 = {"Secondary", 8} },
+        BackgroundTransparency = 0.35,
+        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.new(1, -14, 0.5, 0),
+        Size = UDim2.fromOffset(SEARCH_W, 30),
+        ZIndex = 4
+    }):round(8):stroke({"Secondary", 20}, 1)
+
+    -- Magnifier icon: a ring + a short diagonal handle (theme-tinted).
+    local mag = searchHolder:object("Frame", {
+        BackgroundTransparency = 1,
+        AnchorPoint = Vector2.new(0, 0.5),
+        Position = UDim2.new(0, 11, 0.5, -1),
+        Size = UDim2.fromOffset(10, 10),
+        ZIndex = 5
+    }):round(100):stroke({"WeakText", 2}, 1.5)
+    mag:object("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.new(1, 1, 1, 1),
+        Size = UDim2.fromOffset(5, 1.5),
+        Rotation = 45,
+        Theme = { BackgroundColor3 = {"WeakText", 2} },
+        ZIndex = 5
+    }):round(100)
+
+    local searchBox = searchHolder:object("TextBox", {
+        BackgroundTransparency = 1,
+        Position = UDim2.new(0, 30, 0, 0),
+        Size = UDim2.new(1, -38, 1, 0),
+        Text = "",
+        PlaceholderText = "Search",
+        Theme = { TextColor3 = "StrongText", PlaceholderColor3 = {"WeakText", 2} },
+        TextSize = 13,
+        Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+        ClearTextOnFocus = false,
+        ZIndex = 5
+    })
+
+    searchBox.AbsoluteObject.Focused:Connect(function()
+        searchHolder:tween{BackgroundTransparency = 0.12, Length = 0.12}
+    end)
+    searchBox.AbsoluteObject.FocusLost:Connect(function()
+        searchHolder:tween{BackgroundTransparency = 0.35, Length = 0.12}
+    end)
 
     -- =================================================================
     --                          SIDEBAR
@@ -842,8 +1037,9 @@ function Library:create(options)
 
     local sidebar = core:object("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.new(0, 0, 0, 39),
-        Size = UDim2.new(0, SIDEBAR_WIDTH, 1, -39),
+        Position = UDim2.new(0, 0, 0, TITLE_BAR_HEIGHT + 1),
+        Size = UDim2.new(0, SIDEBAR_WIDTH, 1, -(TITLE_BAR_HEIGHT + 1)),
+        ClipsDescendants = true,
         ZIndex = 3
     })
 
@@ -886,8 +1082,8 @@ function Library:create(options)
 
     local content = core:object("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.new(0, SIDEBAR_WIDTH, 0, 39),
-        Size = UDim2.new(1, -SIDEBAR_WIDTH, 1, -39),
+        Position = UDim2.new(0, SIDEBAR_WIDTH, 0, TITLE_BAR_HEIGHT + 1),
+        Size = UDim2.new(1, -SIDEBAR_WIDTH, 1, -(TITLE_BAR_HEIGHT + 1)),
         ZIndex = 3,
         ClipsDescendants = true
     })
@@ -1351,7 +1547,9 @@ function Library:create(options)
         contentArea          = contentArea,
         toggleButton         = Library._toggleButton,
         nilFolder            = core:object("Folder"),
-        _firstTab            = nil
+        _firstTab            = nil,
+        _navHistory          = {},   -- stack of tab-select functions (browser-style)
+        _navIndex            = 0
     }, Library)
 
     -- Public helper: force-show or hide the floating toggle button
@@ -1433,6 +1631,108 @@ function Library:create(options)
             settingsTab:_select()
         end
     end)
+
+    -- =================================================================
+    --                 TITLE-BAR TOOLBAR BEHAVIOURS
+    --   Wired here (after sidebar / content / tabs exist) so the
+    --   closures can see everything they touch.
+    -- =================================================================
+
+    -- ----- Sidebar collapse / expand -----------------------------------
+    do
+        local collapsed = false
+        sidebarToggleBtn.MouseButton1Click:Connect(function()
+            collapsed = not collapsed
+            local quint = Enum.EasingStyle.Quint
+            if collapsed then
+                sidebar:tween{Size = UDim2.new(0, 0, 1, -(TITLE_BAR_HEIGHT + 1)), Length = 0.28, Style = quint}
+                sidebarSep:tween{BackgroundTransparency = 1, Length = 0.18}
+                content:tween{
+                    Position = UDim2.new(0, 0, 0, TITLE_BAR_HEIGHT + 1),
+                    Size     = UDim2.new(1, 0, 1, -(TITLE_BAR_HEIGHT + 1)),
+                    Length = 0.28, Style = quint
+                }
+                status:tween{Position = UDim2.new(0, 18, 1, -6), Length = 0.28, Style = quint}
+            else
+                sidebar:tween{Size = UDim2.new(0, SIDEBAR_WIDTH, 1, -(TITLE_BAR_HEIGHT + 1)), Length = 0.28, Style = quint}
+                sidebarSep:tween{BackgroundTransparency = 0.45, Length = 0.22}
+                content:tween{
+                    Position = UDim2.new(0, SIDEBAR_WIDTH, 0, TITLE_BAR_HEIGHT + 1),
+                    Size     = UDim2.new(1, -SIDEBAR_WIDTH, 1, -(TITLE_BAR_HEIGHT + 1)),
+                    Length = 0.28, Style = quint
+                }
+                status:tween{Position = UDim2.new(0, SIDEBAR_WIDTH + 16, 1, -6), Length = 0.28, Style = quint}
+            end
+        end)
+        sidebarToggleBtn:tooltip("Toggle sidebar")
+    end
+
+    -- ----- Navigation history (back / forward) -------------------------
+    local function refreshNavArrows()
+        local canBack = mt._navIndex > 1
+        local canFwd  = mt._navIndex < #mt._navHistory
+        backIcon:tween{TextTransparency = canBack and 0 or 0.72, Length = 0.12}
+        fwdIcon:tween{TextTransparency = canFwd  and 0 or 0.72, Length = 0.12}
+    end
+    mt._refreshNavArrows = refreshNavArrows
+
+    -- Called by each tab's selectThisTab (unless we're mid-navigation).
+    function mt:_recordNav(selectFn)
+        if Library._navigating then return end
+        for i = #self._navHistory, self._navIndex + 1, -1 do
+            self._navHistory[i] = nil           -- drop the old forward branch
+        end
+        if self._navHistory[self._navIndex] ~= selectFn then
+            table.insert(self._navHistory, selectFn)
+            self._navIndex = #self._navHistory
+        end
+        refreshNavArrows()
+    end
+
+    local function navigate(step)
+        local target = mt._navIndex + step
+        if target < 1 or target > #mt._navHistory then return end
+        mt._navIndex = target
+        Library._navigating = true
+        pcall(mt._navHistory[target])
+        Library._navigating = false
+        refreshNavArrows()
+    end
+
+    backBtn.MouseButton1Click:Connect(function() navigate(-1) end)
+    fwdBtn.MouseButton1Click:Connect(function() navigate(1)  end)
+    refreshNavArrows()
+
+    -- ----- Search: live-filter the sidebar tabs ------------------------
+    local function applySearch(query)
+        query = tostring(query or ""):lower():match("^%s*(.-)%s*$")
+        local searching = query ~= ""
+        for _, info in ipairs(tabs) do
+            local name = tostring(info[3]):lower()
+            info[2].Visible = (not searching) or (name:find(query, 1, true) ~= nil)
+        end
+        -- During a search we collapse the category headers so the list
+        -- reads as a flat set of matches; restore them when cleared.
+        for _, cat in pairs(categories) do
+            if cat.header then cat.header.Visible = not searching end
+        end
+    end
+    searchBox.AbsoluteObject:GetPropertyChangedSignal("Text"):Connect(function()
+        applySearch(searchBox.Text)
+    end)
+
+    -- ----- Responsive title bar ----------------------------------------
+    --   On narrow windows the search box is the first thing to go, so the
+    --   title never gets squeezed into nothing.
+    local function reflow()
+        local w = core.AbsoluteSize.X
+        local compact = w < 560
+        searchHolder.Visible = not compact
+        local rightReserve = compact and 16 or (SEARCH_W + 28)
+        titleBlock.Size = UDim2.new(1, -(TITLE_LEFT + rightReserve), 1, 0)
+    end
+    core.AbsoluteObject:GetPropertyChangedSignal("AbsoluteSize"):Connect(reflow)
+    reflow()
 
     return mt
 end
@@ -1650,6 +1950,11 @@ function Library:tab(options)
         end
         if Library.UrlLabel then
             Library.UrlLabel.Text = Library.Url .. "/" .. options.Name:lower()
+        end
+        -- Record into the window's navigation history so the title-bar
+        -- back / forward arrows can retrace the user's path.
+        if self._recordNav then
+            self:_recordNav(selectThisTab)
         end
     end
 
