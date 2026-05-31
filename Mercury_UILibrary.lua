@@ -245,6 +245,8 @@ local Library = {
     DragSpeed     = 0.06,
     LockDragging  = false,
     ToggleKey     = Enum.KeyCode.RightControl,
+    AutoHide      = false,   -- hide the UI after a spell of no interaction
+    AutoHideDelay = 30,      -- seconds of inactivity before auto-hiding
     UrlLabel      = nil,
     Url           = nil,
 
@@ -598,28 +600,43 @@ end
 
 function Library:show(state)
     self.Toggled = state
-    self.mainFrame.ClipsDescendants = true
-    local shadow = rawget(self.mainFrame, "_shadowRef")
+    local core   = self.mainFrame
+    local shadow = rawget(core, "_shadowRef")
+
+    -- Re-entrancy guard. Rapidly toggling show/hide used to let an old
+    -- tween's completion callback fire *after* a newer call, leaving the
+    -- window collapsed (Size 0) while ClipsDescendants was flipped back to
+    -- false — so every child spilled out and overlapped on screen. Each
+    -- call now stamps a token; stale callbacks check it and bail out.
+    local token = (rawget(core, "_showToken") or 0) + 1
+    rawset(core, "_showToken", token)
+
+    -- While animating we ALWAYS clip, so a half-grown / half-shrunk window
+    -- can never leak its contents. We only un-clip at the very end of a
+    -- *show* (so overflowing popups like dropdowns can be seen), and only
+    -- if this is still the most recent request.
+    core.ClipsDescendants = true
+
     if state then
-        -- Re-show shadow as window grows back
         if shadow then
             shadow.ImageTransparency = 1
             shadow.Visible = true
             shadow:tween{ImageTransparency = 0.78, Length = 0.25}
         end
-        self.mainFrame:tween({Size = self.mainFrame.oldSize, Length = 0.25}, function()
-            self.mainFrame.ClipsDescendants = false
+        core:fade(false, core.BackgroundColor3, 0.15)
+        core:tween({Size = core.oldSize, Length = 0.25}, function()
+            if rawget(core, "_showToken") == token then
+                core.ClipsDescendants = false
+            end
         end)
-        task.wait(0.05)
-        self.mainFrame:fade(false, self.mainFrame.BackgroundColor3, 0.15)
     else
-        -- Fade the shadow alongside the window so no dark square is left
         if shadow then
             shadow:tween{ImageTransparency = 1, Length = 0.2}
         end
-        self.mainFrame:fade(true, self.mainFrame.BackgroundColor3, 0.15)
-        task.wait(0.05)
-        self.mainFrame:tween{Size = UDim2.new(), Length = 0.25}
+        core:fade(true, core.BackgroundColor3, 0.15)
+        -- Stays clipped (we never un-clip on hide), so the collapsed window
+        -- shows nothing regardless of how the animations interleave.
+        core:tween{Size = UDim2.new(), Length = 0.25}
     end
 end
 
@@ -1309,6 +1326,56 @@ function Library:create(options)
         end
     end)
 
+    -- =================================================================
+    --                  AUTO-HIDE ON INACTIVITY
+    --   When Library.AutoHide is on, the window hides itself after
+    --   Library.AutoHideDelay seconds without the user touching it.
+    --   Any tap / click / move *over the window* counts as activity.
+    -- =================================================================
+    do
+        local lastInteract = os.clock()
+        local wasToggled   = Library.Toggled
+
+        local function resetIdle() lastInteract = os.clock() end
+
+        local function pointInCore(pos)
+            local p, s = core.AbsolutePosition, core.AbsoluteSize
+            return pos.X >= p.X and pos.X <= p.X + s.X
+                and pos.Y >= p.Y and pos.Y <= p.Y + s.Y
+        end
+
+        UserInputService.InputBegan:Connect(function(input, gp)
+            if gp or not Library.Toggled then return end
+            local t = input.UserInputType
+            if (t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch)
+                and pointInCore(input.Position) then
+                resetIdle()
+            end
+        end)
+
+        UserInputService.InputChanged:Connect(function(input)
+            if not Library.Toggled then return end
+            local t = input.UserInputType
+            if (t == Enum.UserInputType.MouseMovement or t == Enum.UserInputType.Touch)
+                and pointInCore(input.Position) then
+                resetIdle()
+            end
+        end)
+
+        RunService.Heartbeat:Connect(function()
+            -- Re-opening the UI resets the timer so it doesn't vanish again
+            -- the instant it appears.
+            if Library.Toggled and not wasToggled then resetIdle() end
+            wasToggled = Library.Toggled
+
+            if Library.AutoHide and Library.Toggled
+                and (os.clock() - lastInteract) >= (Library.AutoHideDelay or 30) then
+                Library.Toggled = false
+                Library:show(false)
+            end
+        end)
+    end
+
     -- Global toggle key
     UserInputService.InputBegan:Connect(function(key, gp)
         if gp then return end
@@ -1640,6 +1707,22 @@ function Library:create(options)
             Max         = 20,
             Default     = 14,
             Callback    = function(value) Library.DragSpeed = (20 - value)/100 end
+        }
+
+        settingsTab:toggle{
+            Name          = "Auto-Hide UI",
+            Description   = "Hide the UI automatically after a period of no interaction.",
+            StartingState = Library.AutoHide,
+            Callback      = function(state) Library.AutoHide = state end
+        }
+
+        settingsTab:slider{
+            Name        = "Auto-Hide Delay",
+            Description = "Seconds of inactivity before the UI hides itself.",
+            Min         = 5,
+            Max         = 120,
+            Default     = Library.AutoHideDelay,
+            Callback    = function(value) Library.AutoHideDelay = value end
         }
 
         -- Auto-select the first tab created by the user (or settings if none)
