@@ -854,8 +854,8 @@ function Library:create(options)
         return btn
     end
 
-    local redLight    = makeLight(Color3.fromRGB(255, 95, 86),  Color3.fromRGB(255, 99, 92),  1, "✕")
-    local yellowLight = makeLight(Color3.fromRGB(255, 189, 46), Color3.fromRGB(255, 191, 49), 2, "–")
+    local redLight    = makeLight(Color3.fromRGB(255, 95, 86),  Color3.fromRGB(255, 99, 92),  1, "×")
+    local yellowLight = makeLight(Color3.fromRGB(255, 189, 46), Color3.fromRGB(255, 191, 49), 2, "-")
     local greenLight  = makeLight(Color3.fromRGB(39, 201, 63),  Color3.fromRGB(40, 200, 64),  3, "+")
 
     -- ----- Toolbar group: sidebar toggle + nav arrows ------------------
@@ -907,32 +907,50 @@ function Library:create(options)
         })
     end
 
-    -- Back / forward navigation arrows
-    local backBtn = makeToolButton(2)
-    local backIcon = backBtn:object("TextLabel", {
-        BackgroundTransparency = 1,
-        Centered = true,
-        Size = UDim2.fromScale(1, 1),
-        Text = "❮",
-        Font = Enum.Font.GothamBold,
-        TextSize = 13,
-        Theme = { TextColor3 = {"WeakText", 4} },
-        TextTransparency = 0.7,
-        ZIndex = 6
-    })
+    -- Back / forward navigation arrows.
+    -- Drawn from frames (not font glyphs) so they ALWAYS render and tint
+    -- with the theme. Unicode chevrons like ❮ ❯ show as blank "tofu" boxes
+    -- on the text font Roblox uses here, so we avoid them entirely.
+    local function makeChevron(button, dir)
+        local box = button:object("Frame", {
+            Centered = true,
+            BackgroundTransparency = 1,
+            Size = UDim2.fromOffset(16, 16),
+            ZIndex = 6
+        })
+        local arms = {}
+        local function arm(mx, my, rot)
+            local a = box:object("Frame", {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Position = UDim2.fromOffset(mx, my),
+                Size = UDim2.fromOffset(7, 2),
+                Rotation = rot,
+                BackgroundTransparency = 0.72,
+                Theme = { BackgroundColor3 = {"WeakText", 4} },
+                ZIndex = 6
+            }):round(100)
+            table.insert(arms, a)
+        end
+        if dir == "left" then       -- "<"  vertex on the left
+            arm(7.5, 6.25, -35)
+            arm(7.5, 9.75,  35)
+        else                        -- ">"  vertex on the right
+            arm(8.5, 6.25,  35)
+            arm(8.5, 9.75, -35)
+        end
+        -- Returns a fade setter: 0 = solid, 1 = hidden (for enabled/disabled).
+        return function(t)
+            for _, a in ipairs(arms) do
+                a:tween{BackgroundTransparency = t, Length = 0.12}
+            end
+        end
+    end
 
-    local fwdBtn = makeToolButton(3)
-    local fwdIcon = fwdBtn:object("TextLabel", {
-        BackgroundTransparency = 1,
-        Centered = true,
-        Size = UDim2.fromScale(1, 1),
-        Text = "❯",
-        Font = Enum.Font.GothamBold,
-        TextSize = 13,
-        Theme = { TextColor3 = {"WeakText", 4} },
-        TextTransparency = 0.7,
-        ZIndex = 6
-    })
+    local backBtn  = makeToolButton(2)
+    local backFade = makeChevron(backBtn, "left")
+
+    local fwdBtn  = makeToolButton(3)
+    local fwdFade = makeChevron(fwdBtn, "right")
 
     -- ----- App title + subtitle (left-aligned, stacked) ----------------
     local TITLE_LEFT  = 194
@@ -1671,8 +1689,8 @@ function Library:create(options)
     local function refreshNavArrows()
         local canBack = mt._navIndex > 1
         local canFwd  = mt._navIndex < #mt._navHistory
-        backIcon:tween{TextTransparency = canBack and 0 or 0.72, Length = 0.12}
-        fwdIcon:tween{TextTransparency = canFwd  and 0 or 0.72, Length = 0.12}
+        backFade(canBack and 0 or 0.72)
+        fwdFade(canFwd  and 0 or 0.72)
     end
     mt._refreshNavArrows = refreshNavArrows
 
