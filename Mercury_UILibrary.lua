@@ -1,7 +1,7 @@
 --[[
 
     Mercury UILibrary — macOS Edition
-    edited: 17/26
+    edited: 08/06/2026
     developers: Ness
 
     Upgrades vs. original:
@@ -21,6 +21,25 @@
         responsive title bar (search hides on narrow windows)
       • Tab categories (e.g. "Main", "Settings") in the sidebar
       • Same public API as the original — drop-in replacement.
+
+    ── Update (mobile-first systems) ──────────────────────────────
+      • Config save system: any component with a `Flag = "name"` option
+        is auto-tracked. Window:SaveConfig("slot") / :LoadConfig("slot")
+        / :ListConfigs() / :DeleteConfig("slot"). Colours and keycodes
+        serialise transparently. (Tab:Toggle/Slider/Dropdown/Keybind/
+        TextBox/ColorPicker all accept Flag.)
+      • Dropdown: new `Multi = true` (multi-select with checkboxes) and
+        `Search = true` (live filter box) — both fully touch-friendly.
+        New methods :SetValue(v) / :GetSelected(). `Default` preselects.
+      • Keybind: now usable on phones — with no physical keyboard, the
+        row itself becomes a trigger button (shows "TAP"). Flag support.
+      • Slider: `Increment` + `Decimals` for fractional values, and the
+        value box now shows the `Suffix` and tolerates it when typing.
+      • Notifications: `Type = "success" | "warning" | "error" | "info"`
+        recolours the icon, progress bar, and border accent.
+      • New elements: divider (optional caption), paragraph (auto-sizing
+        wrapped text block), and image (rounded asset card).
+    ────────────────────────────────────────────────────────────────
 
 ]]
 
@@ -2245,6 +2264,7 @@ function Library:toggle(options)
         Name          = "Toggle",
         StartingState = false,
         Description   = nil,
+        Flag          = nil,
         Callback      = function() end
     }, options)
 
@@ -2312,6 +2332,12 @@ function Library:toggle(options)
 
     if options.StartingState then setState(true) end
 
+    if options.Flag then
+        Library:_registerFlag(options.Flag,
+            function() return toggled end,
+            function(v) setState(v) end)
+    end
+
     return methods
 end
 
@@ -2328,6 +2354,9 @@ function Library:slider(options)
         Min         = 0,
         Max         = 100,
         Suffix      = "",
+        Increment   = 1,     -- step size; set to 0.1 / 0.5 etc. for fine control
+        Decimals    = 0,     -- how many decimal places to display
+        Flag        = nil,   -- key for the config save system
         Description = nil,
         Callback    = function() end
     }, options)
@@ -2376,12 +2405,32 @@ function Library:slider(options)
 
     local currentValue = options.Default
 
+    -- Snap to the configured increment and round to the requested
+    -- number of decimal places. Works for integer *and* fractional
+    -- sliders (e.g. Increment = 0.1, Decimals = 1).
+    local function snap(value)
+        local inc = options.Increment
+        if inc and inc > 0 then
+            value = math.floor((value / inc) + 0.5) * inc
+        end
+        local mult = 10 ^ (options.Decimals or 0)
+        value = math.floor(value * mult + 0.5) / mult
+        return math.clamp(value, options.Min, options.Max)
+    end
+
+    local function fmt(v)
+        local d = options.Decimals or 0
+        local s = (d > 0) and string.format("%." .. d .. "f", v) or tostring(math.floor(v + 0.5))
+        if options.Suffix and options.Suffix ~= "" then s = s .. " " .. options.Suffix end
+        return s
+    end
+
     local function applyValue(value, fireCallback)
-        value = math.clamp(math.floor(value + 0.5), options.Min, options.Max)
+        value = snap(value)
         currentValue = value
-        local p = (value - options.Min) / math.max(1, (options.Max - options.Min))
-        fill:tween{Size = UDim2.fromScale(p, 1), Length = 0.08}
-        valueBox.Text = tostring(value)
+        local p = (value - options.Min) / math.max(1e-9, (options.Max - options.Min))
+        fill:tween{Size = UDim2.fromScale(math.clamp(p, 0, 1), 1), Length = 0.08}
+        valueBox.Text = fmt(value)
         if fireCallback ~= false then
             task.spawn(options.Callback, value)
         end
@@ -2438,17 +2487,28 @@ function Library:slider(options)
 
     -- Type a value into the box
     valueBox.AbsoluteObject.FocusLost:Connect(function()
-        local num = tonumber(valueBox.Text)
+        -- strip any suffix / stray characters before parsing
+        local cleaned = valueBox.Text:gsub("[^%-%d%.]", "")
+        local num = tonumber(cleaned)
         if num then
             applyValue(num)
         else
-            valueBox.Text = tostring(currentValue)
+            valueBox.Text = fmt(currentValue)
         end
     end)
+
+    -- show the formatted default (with suffix) right away
+    valueBox.Text = fmt(currentValue)
 
     local methods = {}
     function methods:Set(value) applyValue(value) end
     function methods:Get()      return currentValue end
+
+    if options.Flag then
+        Library:_registerFlag(options.Flag,
+            function() return currentValue end,
+            function(v) applyValue(v) end)
+    end
 
     return methods
 end
@@ -2509,6 +2569,10 @@ function Library:dropdown(options)
         StartingText = "Select...",
         Description  = nil,
         Items        = {},
+        Multi        = false,   -- allow selecting more than one item at once
+        Search       = false,   -- show a filter box at the top of the list
+        Default      = nil,     -- preselected value (single) or list of values (multi)
+        Flag         = nil,     -- key for the config save system
         Callback     = function() end
     }, options)
 
@@ -2528,7 +2592,10 @@ function Library:dropdown(options)
         TextSize = 12,
         TextTruncate = Enum.TextTruncate.AtEnd
     }):round(6)
-    selectedBadge.Size = UDim2.fromOffset(math.clamp(selectedBadge.TextBounds.X + 18, 60, 160), 24)
+    local function fitBadge()
+        selectedBadge.Size = UDim2.fromOffset(math.clamp(selectedBadge.TextBounds.X + 18, 60, 160), 24)
+    end
+    fitBadge()
 
     local chevron = row:object("ImageLabel", {
         AnchorPoint = Vector2.new(1, 0.5),
@@ -2539,7 +2606,9 @@ function Library:dropdown(options)
         Theme = { ImageColor3 = "Tertiary" }
     })
 
-    -- Expandable item area
+    -- Expandable item area. Heights are driven off the UIListLayout's
+    -- AbsoluteContentSize so the row resizes correctly when items are
+    -- added, removed, or hidden by the search filter — no manual counting.
     local itemArea = row:object("Frame", {
         BackgroundTransparency = 1,
         Position = UDim2.new(0, 14, 0, ROW_HEIGHT),
@@ -2552,16 +2621,119 @@ function Library:dropdown(options)
         SortOrder = Enum.SortOrder.LayoutOrder
     })
 
-    local items = {}
-    local open = false
+    local items = {}            -- { label=, value=, btn=, check= }
+    local open  = false
+    local multiSelected = {}    -- label -> value (multi mode only)
+    local singleValue, singleLabel = nil, nil
+
+    -- ───── Optional search box (LayoutOrder 0 so it sits on top) ─────
+    local searchBox
+    if options.Search then
+        searchBox = itemArea:object("TextBox", {
+            LayoutOrder = 0,
+            Size = UDim2.new(1, 0, 0, 28),
+            Theme = {
+                BackgroundColor3 = {"Secondary", 10},
+                TextColor3 = "StrongText"
+            },
+            BackgroundTransparency = 0.2,
+            PlaceholderText = "Search...",
+            PlaceholderColor3 = Library:lighten(Library.CurrentTheme.WeakText, 5),
+            Font = Enum.Font.GothamMedium,
+            TextSize = 12,
+            ClearTextOnFocus = false,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            ZIndex = 5
+        }):round(6)
+        searchBox:object("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) })
+    end
+
+    -- ───── Size driving ─────
+    local function applyOpenSizes(animate)
+        local h   = itemLayout.AbsoluteContentSize.Y
+        local len = animate and 0.18 or 0
+        itemArea:tween{Size = UDim2.new(1, -28, 0, h), Length = len}
+        row:tween{Size = UDim2.new(1, 0, 0, ROW_HEIGHT + h + 12), Length = len}
+    end
+
+    itemLayout.AbsoluteObject:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        if open then applyOpenSizes(false) end
+    end)
 
     local function setOpen(state)
         open = state
-        local itemH = (#items * 30) + (math.max(0, #items - 1) * 4)
-        local rowH  = ROW_HEIGHT + (state and (itemH + 12) or 0)
-        row:tween{Size = UDim2.new(1, 0, 0, rowH), Length = 0.18}
-        itemArea:tween{Size = UDim2.new(1, -28, 0, state and itemH or 0), Length = 0.18}
         chevron:tween{Rotation = state and 180 or 0, Length = 0.18}
+        if state then
+            applyOpenSizes(true)
+        else
+            itemArea:tween{Size = UDim2.new(1, -28, 0, 0), Length = 0.18}
+            row:tween{Size = UDim2.new(1, 0, 0, ROW_HEIGHT), Length = 0.18}
+            if searchBox then searchBox.Text = "" end
+            for _, it in next, items do it.btn.AbsoluteObject.Visible = true end
+        end
+    end
+
+    -- ───── Badge text helpers ─────
+    local function refreshBadge()
+        if options.Multi then
+            local names = {}
+            for _, it in next, items do
+                if multiSelected[it.label] ~= nil then names[#names + 1] = it.label end
+            end
+            if #names == 0 then
+                selectedBadge.Text = options.StartingText
+            elseif #names <= 2 then
+                selectedBadge.Text = table.concat(names, ", ")
+            else
+                selectedBadge.Text = #names .. " selected"
+            end
+        else
+            selectedBadge.Text = singleLabel and tostring(singleLabel) or options.StartingText
+        end
+        fitBadge()
+    end
+
+    -- ───── Per-item visuals ─────
+    local function paintItem(it)
+        local picked = options.Multi and (multiSelected[it.label] ~= nil)
+            or (not options.Multi and singleLabel == it.label)
+        if it.check then
+            it.check:tween{
+                BackgroundColor3 = picked and Library.CurrentTheme.Tertiary
+                    or Library:lighten(Library.CurrentTheme.Secondary, 30),
+                Length = 0.1
+            }
+            it.check.AbsoluteObject.Visible = true
+        end
+        it.btn:tween{
+            BackgroundColor3 = picked and Library.CurrentTheme.Tertiary
+                or Library:lighten(Library.CurrentTheme.Secondary, 15),
+            BackgroundTransparency = picked and 0.15 or 0.3,
+            Length = 0.1
+        }
+    end
+
+    local function selectSingle(it)
+        singleValue, singleLabel = it.value, it.label
+        for _, other in next, items do paintItem(other) end
+        refreshBadge()
+        task.spawn(options.Callback, it.value)
+        setOpen(false)
+    end
+
+    local function toggleMulti(it)
+        if multiSelected[it.label] ~= nil then
+            multiSelected[it.label] = nil
+        else
+            multiSelected[it.label] = it.value
+        end
+        paintItem(it)
+        refreshBadge()
+        local list = {}
+        for _, o in next, items do
+            if multiSelected[o.label] ~= nil then list[#list + 1] = o.value end
+        end
+        task.spawn(options.Callback, list)
     end
 
     local function buildItem(label, value, idx)
@@ -2576,75 +2748,170 @@ function Library:dropdown(options)
 
         btn:object("TextLabel", {
             BackgroundTransparency = 1,
-            Position = UDim2.fromOffset(10, 0),
-            Size = UDim2.new(1, -16, 1, 0),
+            Position = UDim2.fromOffset(options.Multi and 28 or 10, 0),
+            Size = UDim2.new(1, options.Multi and -34 or -16, 1, 0),
             Text = tostring(label),
             TextSize = 12,
             Font = Enum.Font.GothamMedium,
             Theme = { TextColor3 = "StrongText" },
             TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
             ZIndex = 4
         })
 
-        btn.MouseEnter:Connect(function()
-            btn:tween{BackgroundColor3 = Library.CurrentTheme.Tertiary, BackgroundTransparency = 0.1, Length = 0.1}
-        end)
-        btn.MouseLeave:Connect(function()
-            btn:tween{
-                BackgroundColor3 = Library:lighten(Library.CurrentTheme.Secondary, 15),
-                BackgroundTransparency = 0.3,
-                Length = 0.1
-            }
-        end)
+        local check
+        if options.Multi then
+            check = btn:object("Frame", {
+                AnchorPoint = Vector2.new(0, 0.5),
+                Position = UDim2.new(0, 8, 0.5, 0),
+                Size = UDim2.fromOffset(12, 12),
+                BackgroundColor3 = Library:lighten(Library.CurrentTheme.Secondary, 30),
+                ZIndex = 4
+            }):round(4)
+        end
+
+        local it = {label = label, value = value, btn = btn, check = check}
+
+        if not options.Multi then
+            btn.MouseEnter:Connect(function()
+                if singleLabel ~= label then
+                    btn:tween{BackgroundColor3 = Library.CurrentTheme.Tertiary, BackgroundTransparency = 0.1, Length = 0.1}
+                end
+            end)
+            btn.MouseLeave:Connect(function()
+                if singleLabel ~= label then
+                    btn:tween{
+                        BackgroundColor3 = Library:lighten(Library.CurrentTheme.Secondary, 15),
+                        BackgroundTransparency = 0.3,
+                        Length = 0.1
+                    }
+                end
+            end)
+        end
+
         btn.MouseButton1Click:Connect(function()
-            selectedBadge.Text = tostring(label)
-            selectedBadge.Size = UDim2.fromOffset(math.clamp(selectedBadge.TextBounds.X + 18, 60, 160), 24)
-            task.spawn(options.Callback, value)
-            setOpen(false)
+            if options.Multi then toggleMulti(it) else selectSingle(it) end
         end)
 
-        return btn
+        return it
     end
 
-    -- Populate initial items
-    for i, v in next, options.Items do
+    -- ───── Search filtering ─────
+    if searchBox then
+        searchBox.AbsoluteObject:GetPropertyChangedSignal("Text"):Connect(function()
+            local q = searchBox.Text:lower()
+            for _, it in next, items do
+                it.btn.AbsoluteObject.Visible = (q == "") or (tostring(it.label):lower():find(q, 1, true) ~= nil)
+            end
+        end)
+    end
+
+    -- ───── Populate initial items ─────
+    local function addOne(v)
         local label, value
         if typeof(v) == "table" then label, value = v[1], v[2] else label, value = tostring(v), v end
-        items[#items + 1] = {label = label, value = value, btn = buildItem(label, value, #items + 1)}
+        items[#items + 1] = buildItem(label, value, #items + 1)
+    end
+    for _, v in next, options.Items do addOne(v) end
+
+    -- ───── Apply Default selection ─────
+    if options.Default ~= nil then
+        if options.Multi then
+            local defs = (typeof(options.Default) == "table") and options.Default or {options.Default}
+            for _, dv in next, defs do
+                for _, it in next, items do
+                    if it.value == dv or it.label == dv then multiSelected[it.label] = it.value end
+                end
+            end
+        else
+            for _, it in next, items do
+                if it.value == options.Default or it.label == options.Default then
+                    singleValue, singleLabel = it.value, it.label
+                    break
+                end
+            end
+        end
+        for _, it in next, items do paintItem(it) end
+        refreshBadge()
     end
 
-    -- Row click toggles
+    -- Row click toggles open/close
     row.MouseButton1Click:Connect(function() setOpen(not open) end)
 
     local methods = {}
+
+    -- Manual label override (kept for backwards compatibility)
     function methods:Set(text)
         selectedBadge.Text = tostring(text)
-        selectedBadge.Size = UDim2.fromOffset(math.clamp(selectedBadge.TextBounds.X + 18, 60, 160), 24)
+        fitBadge()
     end
-    function methods:AddItems(newItems)
-        for _, v in next, newItems do
-            local label, value
-            if typeof(v) == "table" then label, value = v[1], v[2] else label, value = tostring(v), v end
-            items[#items + 1] = {label = label, value = value, btn = buildItem(label, value, #items + 1)}
+
+    -- Programmatically choose value(s)
+    function methods:SetValue(v)
+        if options.Multi then
+            multiSelected = {}
+            local defs = (typeof(v) == "table") and v or {v}
+            for _, dv in next, defs do
+                for _, it in next, items do
+                    if it.value == dv or it.label == dv then multiSelected[it.label] = it.value end
+                end
+            end
+        else
+            for _, it in next, items do
+                if it.value == v or it.label == v then
+                    singleValue, singleLabel = it.value, it.label
+                    break
+                end
+            end
         end
-        if open then setOpen(true) end
+        for _, it in next, items do paintItem(it) end
+        refreshBadge()
     end
+
+    function methods:GetSelected()
+        if options.Multi then
+            local list = {}
+            for _, it in next, items do
+                if multiSelected[it.label] ~= nil then list[#list + 1] = it.value end
+            end
+            return list
+        end
+        return singleValue
+    end
+
+    function methods:AddItems(newItems)
+        for _, v in next, newItems do addOne(v) end
+        if open then applyOpenSizes(false) end
+    end
+
     function methods:RemoveItems(removeList)
         for _, v in next, removeList do
             for idx, it in next, items do
                 if tostring(it.label):lower() == tostring(v):lower() then
+                    multiSelected[it.label] = nil
                     it.btn.AbsoluteObject:Destroy()
                     table.remove(items, idx)
                     break
                 end
             end
         end
-        if open then setOpen(true) end
+        refreshBadge()
+        if open then applyOpenSizes(false) end
     end
+
     function methods:Clear()
         for _, it in next, items do it.btn.AbsoluteObject:Destroy() end
         items = {}
+        multiSelected = {}
+        singleValue, singleLabel = nil, nil
+        refreshBadge()
         setOpen(false)
+    end
+
+    if options.Flag then
+        Library:_registerFlag(options.Flag,
+            function() return methods:GetSelected() end,
+            function(v) methods:SetValue(v) end)
     end
 
     return methods
@@ -2659,6 +2926,7 @@ function Library:keybind(options)
         Name        = "Keybind",
         Keybind     = nil,
         Description = nil,
+        Flag        = nil,
         Callback    = function() end
     }, options)
 
@@ -2672,7 +2940,7 @@ function Library:keybind(options)
             BackgroundColor3 = {"Secondary", 20},
             TextColor3 = "StrongText"
         },
-        Text = options.Keybind and tostring(options.Keybind.Name):upper() or "?",
+        Text = options.Keybind and tostring(options.Keybind.Name):upper() or (IsMobile and "TAP" or "?"),
         Font = Enum.Font.GothamMedium,
         TextSize = 11
     }):round(6)
@@ -2681,6 +2949,16 @@ function Library:keybind(options)
     local listening = false
 
     row.MouseButton1Click:Connect(function()
+        if IsMobile then
+            -- Touch devices have no physical keyboard, so the row itself
+            -- doubles as a trigger button — the bound action stays usable.
+            row:tween{BackgroundTransparency = 0.05, Length = 0.06}
+            task.delay(0.1, function()
+                row:tween{BackgroundTransparency = 0.4, Length = 0.12}
+            end)
+            task.spawn(options.Callback)
+            return
+        end
         if not listening then
             listening = true
             keyBadge.Text = "..."
@@ -2710,8 +2988,14 @@ function Library:keybind(options)
     local methods = {}
     function methods:Set(keycode)
         options.Keybind = keycode
-        keyBadge.Text = keycode and tostring(keycode.Name):upper() or "?"
+        keyBadge.Text = keycode and tostring(keycode.Name):upper() or (IsMobile and "TAP" or "?")
         keyBadge.Size = UDim2.fromOffset(math.clamp(keyBadge.TextBounds.X + 18, 36, 100), 24)
+    end
+
+    if options.Flag then
+        Library:_registerFlag(options.Flag,
+            function() return options.Keybind end,
+            function(v) methods:Set(v) end)
     end
 
     return methods
@@ -2726,6 +3010,7 @@ function Library:textbox(options)
         Name        = "Text Box",
         Placeholder = "Type something..",
         Description = nil,
+        Flag        = nil,
         Callback    = function() end
     }, options)
 
@@ -2788,6 +3073,12 @@ function Library:textbox(options)
     local methods = {}
     function methods:Set(t) input.Text = t end
     function methods:Get()  return input.Text end
+
+    if options.Flag then
+        Library:_registerFlag(options.Flag,
+            function() return input.Text end,
+            function(v) input.Text = tostring(v or "") end)
+    end
 
     return methods
 end
@@ -2853,6 +3144,7 @@ function Library:notification(options)
         Title    = "Notification",
         Text     = "Your character has been reset.",
         Duration = 4,
+        Type     = "info",   -- "info" | "success" | "warning" | "error"
         Callback = function() end
     }, options)
 
@@ -2976,6 +3268,19 @@ function Library:notification(options)
         Theme = { BackgroundColor3 = "Tertiary" },
         Size = UDim2.fromScale(1, 1)
     }):round(100)
+
+    -- ───── Semantic accent (success / warning / error) ─────
+    local TYPE_COLORS = {
+        success = Color3.fromRGB(64, 200, 130),
+        warning = Color3.fromRGB(245, 190, 70),
+        error   = Color3.fromRGB(240, 90, 90),
+    }
+    local typeAccent = TYPE_COLORS[tostring(options.Type):lower()]
+    if typeAccent then
+        icon.ImageColor3      = typeAccent
+        lengthBar.BackgroundColor3 = typeAccent
+        noti.AbsoluteObject:FindFirstChildWhichIsA("UIStroke").Color = typeAccent
+    end
 
     -- ───── Animations ─────
     local fadeOut
@@ -3492,6 +3797,7 @@ function Library:color_picker(options)
         Style       = Library.ColorPickerStyles.Modern,
         Default     = Color3.fromRGB(255, 80, 100),
         Followup    = false,
+        Flag        = nil,
         Callback    = function() end
     }, options)
 
@@ -3770,11 +4076,263 @@ function Library:color_picker(options)
     end
     function methods:Get() return selectedColor end
 
+    if options.Flag then
+        Library:_registerFlag(options.Flag,
+            function() return selectedColor end,
+            function(v) methods:Set(v) end)
+    end
+
     return methods
 end
 
 function Library:cp(options)          return Library.color_picker(self, options) end
 function Library:colorpicker(options) return Library.color_picker(self, options) end
+
+
+-- =====================================================================
+--                            DIVIDER
+--   A thin separator, optionally with a small left-aligned caption.
+-- =====================================================================
+
+function Library:divider(options)
+    options = self:set_defaults({ Text = nil }, options)
+
+    local holder = self.container:object("Frame", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, options.Text and 26 or 14)
+    })
+
+    holder:object("Frame", {
+        AnchorPoint = Vector2.new(0.5, 1),
+        Position = UDim2.new(0.5, 0, 1, options.Text and -2 or -6),
+        Size = UDim2.new(1, -4, 0, 1),
+        Theme = { BackgroundColor3 = {"Secondary", 30} },
+        BackgroundTransparency = 0.1
+    })
+
+    local caption
+    if options.Text then
+        caption = holder:object("TextLabel", {
+            BackgroundTransparency = 1,
+            Position = UDim2.fromOffset(2, 0),
+            Size = UDim2.new(1, -4, 0, 18),
+            Text = options.Text,
+            TextSize = 12,
+            Font = Enum.Font.GothamMedium,
+            Theme = { TextColor3 = {"WeakText", 5} },
+            TextXAlignment = Enum.TextXAlignment.Left
+        })
+    end
+
+    local methods = {}
+    function methods:SetText(t) if caption then caption.Text = t end end
+    return methods
+end
+
+-- =====================================================================
+--                            PARAGRAPH
+--   A titled block of wrapping body text. Auto-sizes to its content,
+--   so it works at any window width — including narrow mobile windows.
+-- =====================================================================
+
+function Library:paragraph(options)
+    options = self:set_defaults({ Title = "Paragraph", Text = "" }, options)
+
+    local holder = self.container:object("Frame", {
+        Theme = { BackgroundColor3 = "Secondary" },
+        BackgroundTransparency = 0.4,
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y
+    }):round(8)
+
+    holder:object("UIPadding", {
+        PaddingLeft   = UDim.new(0, 14),
+        PaddingRight  = UDim.new(0, 14),
+        PaddingTop    = UDim.new(0, 10),
+        PaddingBottom = UDim.new(0, 12)
+    })
+
+    holder:object("UIListLayout", {
+        Padding = UDim.new(0, 4),
+        SortOrder = Enum.SortOrder.LayoutOrder
+    })
+
+    local title = holder:object("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 18),
+        Text = options.Title,
+        TextSize = 15,
+        Font = Enum.Font.GothamBold,
+        Theme = { TextColor3 = "StrongText" },
+        TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = 1
+    })
+
+    local body = holder:object("TextLabel", {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        Text = options.Text,
+        TextSize = 13,
+        Font = Enum.Font.Gotham,
+        Theme = { TextColor3 = {"WeakText", 10} },
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        TextWrapped = true,
+        LayoutOrder = 2
+    })
+
+    local methods = {}
+    function methods:SetTitle(t) title.Text = tostring(t) end
+    function methods:SetText(t)  body.Text  = tostring(t) end
+    return methods
+end
+
+-- =====================================================================
+--                              IMAGE
+--   Display an rbxassetid / decal inside a rounded card.
+-- =====================================================================
+
+function Library:image(options)
+    options = self:set_defaults({
+        Image    = "",
+        Height   = 140,
+        Scale    = Enum.ScaleType.Fit,
+        Rounding = 8
+    }, options)
+
+    local holder = self.container:object("Frame", {
+        Theme = { BackgroundColor3 = "Secondary" },
+        BackgroundTransparency = 0.4,
+        Size = UDim2.new(1, 0, 0, options.Height)
+    }):round(options.Rounding)
+
+    local img = holder:object("ImageLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(8, 8),
+        Size = UDim2.new(1, -16, 1, -16),
+        Image = options.Image,
+        ScaleType = options.Scale
+    })
+
+    local methods = {}
+    function methods:Set(id) img.Image = tostring(id) end
+    return methods
+end
+
+-- =====================================================================
+--                     CONFIG / FLAG SAVE SYSTEM
+--   Any component created with a `Flag = "name"` option registers its
+--   getter/setter here. SaveConfig serialises every flag to a JSON file
+--   under MercuryConfigs/, LoadConfig restores them. Colours and
+--   keycodes are serialised/restored transparently. Works on any
+--   executor that exposes writefile/readfile/isfile.
+-- =====================================================================
+
+Library.Flags        = Library.Flags or {}
+Library.ConfigFolder = "MercuryConfigs"
+
+function Library:_registerFlag(flag, getter, setter)
+    if not flag then return end
+    Library.Flags[tostring(flag)] = { get = getter, set = setter }
+end
+
+local function _serialize(v)
+    local t = typeof(v)
+    if t == "Color3" then
+        return { __t = "Color3",
+            r = math.floor(v.R * 255 + 0.5),
+            g = math.floor(v.G * 255 + 0.5),
+            b = math.floor(v.B * 255 + 0.5) }
+    elseif t == "EnumItem" then
+        return { __t = "Enum", e = tostring(v.EnumType), n = v.Name }
+    elseif t == "table" then
+        local out = {}
+        for k, vv in next, v do out[k] = _serialize(vv) end
+        return out
+    end
+    return v
+end
+
+local function _deserialize(v)
+    if typeof(v) == "table" then
+        if v.__t == "Color3" then
+            return Color3.fromRGB(v.r or 0, v.g or 0, v.b or 0)
+        elseif v.__t == "Enum" then
+            local ok, item = pcall(function() return Enum[v.e][v.n] end)
+            return ok and item or nil
+        else
+            local out = {}
+            for k, vv in next, v do out[k] = _deserialize(vv) end
+            return out
+        end
+    end
+    return v
+end
+
+local function _fileAPI()
+    return (writefile and readfile and isfile) and true or false
+end
+
+function Library:saveconfig(name)
+    if not _fileAPI() then return false, "no file API on this executor" end
+    name = tostring(name or "default")
+    if makefolder and isfolder and not isfolder(Library.ConfigFolder) then
+        pcall(makefolder, Library.ConfigFolder)
+    end
+    local data = {}
+    for flag, ctrl in next, Library.Flags do
+        local ok, val = pcall(ctrl.get)
+        if ok and val ~= nil then data[flag] = _serialize(val) end
+    end
+    local path = Library.ConfigFolder .. "/" .. name .. ".json"
+    local ok = pcall(writefile, path, HTTPService:JSONEncode(data))
+    return ok
+end
+
+function Library:loadconfig(name)
+    if not _fileAPI() then return false, "no file API on this executor" end
+    name = tostring(name or "default")
+    local path = Library.ConfigFolder .. "/" .. name .. ".json"
+    if not isfile(path) then return false, "config not found" end
+    local ok, raw = pcall(readfile, path)
+    if not ok then return false, "read failed" end
+    local ok2, decoded = pcall(function() return HTTPService:JSONDecode(raw) end)
+    if not ok2 or typeof(decoded) ~= "table" then return false, "decode failed" end
+    for flag, val in next, decoded do
+        local ctrl = Library.Flags[flag]
+        if ctrl and ctrl.set then
+            pcall(ctrl.set, _deserialize(val))
+        end
+    end
+    return true
+end
+
+function Library:listconfigs()
+    local out = {}
+    if listfiles and isfolder and isfolder(Library.ConfigFolder) then
+        local ok, files = pcall(listfiles, Library.ConfigFolder)
+        if ok then
+            for _, f in next, files do
+                local nm = tostring(f):match("([^/\\]+)%.json$")
+                if nm then out[#out + 1] = nm end
+            end
+        end
+    end
+    return out
+end
+
+function Library:deleteconfig(name)
+    if delfile and isfile then
+        local path = Library.ConfigFolder .. "/" .. tostring(name) .. ".json"
+        if isfile(path) then
+            local ok = pcall(delfile, path)
+            return ok
+        end
+    end
+    return false
+end
+
 
 -- =====================================================================
 --                        FINAL METATABLE
