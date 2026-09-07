@@ -22,6 +22,18 @@
       • Tab categories (e.g. "Main", "Settings") in the sidebar
       • Same public API as the original — drop-in replacement.
 
+    Update 09/07 — Real browser-chrome title bar:
+      • Title bar split into two stacked rows, matching an actual browser
+        window: Row 1 = traffic lights + a tab-style title/subtitle chip.
+        Row 2 = nav arrows + a full-width address-bar-style search pill.
+      • Sidebar "selected tab" now shows an accent-colored border (UIStroke)
+        around the row, in addition to the existing background tint —
+        mirrors how browsers ring the active thumbnail/tab instead of
+        just filling it.
+      • Retired the old single-row "compact" reflow (search box hiding on
+        narrow windows) since the address bar now owns its own full-width
+        row and no longer competes with the title for space.
+
 ]]
 
 local TweenService     = game:GetService("TweenService")
@@ -809,11 +821,19 @@ function Library:create(options)
 
     -- =================================================================
     --                          TITLE BAR
-    --   Browser-style toolbar:  ●●●   ▣  ‹ ›   Title / Subtitle   🔍 Search
-    --   (traffic lights · sidebar toggle · nav arrows · titles · search)
+    --   Row 1 (tab strip):  ●●●     [ Title / Subtitle ]
+    --   Row 2 (toolbar):    ▣  ‹ ›  [   🔍  Search / Address bar   ]
     -- =================================================================
 
-    local TITLE_BAR_HEIGHT = 52
+    -- Two stacked rows instead of one, like a real browser: a slim
+    -- "tab strip" row up top (lights + title chip) and a toolbar row
+    -- below it (nav arrows + full-width address/search bar). Every
+    -- other section of the window (sidebar, content, collapse tweens)
+    -- only ever reads the combined TITLE_BAR_HEIGHT, so they don't need
+    -- to change even though the bar is now taller and two-part.
+    local TAB_ROW_HEIGHT     = 50
+    local TOOLBAR_ROW_HEIGHT = 40
+    local TITLE_BAR_HEIGHT   = TAB_ROW_HEIGHT + TOOLBAR_ROW_HEIGHT
 
     -- Resolve the subtitle once. Either an explicit string, or built from
     -- a short Author name → "Made by <Author>".
@@ -845,11 +865,20 @@ function Library:create(options)
         ZIndex = 3
     })
 
+    -- subtle separator between the tab-strip row and the toolbar row
+    local rowSep = core:object("Frame", {
+        Theme = { BackgroundColor3 = {"Secondary", 6} },
+        BackgroundTransparency = 0.6,
+        Position = UDim2.new(0, 0, 0, TAB_ROW_HEIGHT),
+        Size = UDim2.new(1, 0, 0, 1),
+        ZIndex = 3
+    })
+
     -- ----- Traffic lights ----------------------------------------------
     local lightHolder = titleBar:object("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(16, 0),
-        Size = UDim2.new(0, 66, 1, 0),
+        Position = UDim2.new(0, 16, 0, 0),
+        Size = UDim2.new(0, 66, 0, TAB_ROW_HEIGHT),
         ZIndex = 4
     })
     lightHolder:object("UIListLayout", {
@@ -899,8 +928,8 @@ function Library:create(options)
     -- ----- Toolbar group: sidebar toggle + nav arrows ------------------
     local toolbar = titleBar:object("Frame", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(88, 0),
-        Size = UDim2.new(0, 96, 1, 0),
+        Position = UDim2.new(0, 12, 0, TAB_ROW_HEIGHT),
+        Size = UDim2.new(0, 96, 0, TOOLBAR_ROW_HEIGHT),
         ZIndex = 4
     })
     toolbar:object("UIListLayout", {
@@ -990,14 +1019,25 @@ function Library:create(options)
     local fwdBtn  = makeToolButton(3)
     local fwdFade = makeChevron(fwdBtn, "right")
 
-    -- ----- App title + subtitle (left-aligned, stacked) ----------------
-    local TITLE_LEFT  = 194
-    local SEARCH_W    = IsMobile and 148 or 192
+    -- ----- App title + subtitle, drawn as a "tab chip" in row 1 --------
+    --   Now that the address bar owns the whole of row 2 by itself, the
+    --   title no longer has to share horizontal space with it, so it
+    --   gets a light background chip behind it — reads like the active
+    --   tab in a real browser's tab strip.
+    local TITLE_LEFT = 96
+
+    local tabChip = titleBar:object("Frame", {
+        Theme = { BackgroundColor3 = {"Secondary", 6} },
+        BackgroundTransparency = 0.5,
+        Position = UDim2.new(0, TITLE_LEFT - 10, 0, 6),
+        Size = UDim2.new(1, -(TITLE_LEFT - 10) - 16, 0, TAB_ROW_HEIGHT - 12),
+        ZIndex = 3
+    }):round(8)
+
     local titleBlock = titleBar:object("Frame", {
         BackgroundTransparency = 1,
-        AnchorPoint = Vector2.new(0, 0.5),
-        Position = UDim2.new(0, TITLE_LEFT, 0.5, 0),
-        Size = UDim2.new(1, -(TITLE_LEFT + SEARCH_W + 28), 1, 0),
+        Position = UDim2.new(0, TITLE_LEFT, 0, 0),
+        Size = UDim2.new(1, -(TITLE_LEFT + 16), 0, TAB_ROW_HEIGHT),
         ClipsDescendants = true,
         ZIndex = 4
     })
@@ -1035,14 +1075,17 @@ function Library:create(options)
         })
     end
 
-    -- ----- Search box (right) ------------------------------------------
-    --   Filters the sidebar tabs live as you type.
+    -- ----- Address bar (row 2) ------------------------------------------
+    --   A full-width pill, like a browser's address bar — sits below the
+    --   nav arrows and fills the rest of the toolbar row. Functionally
+    --   it's unchanged from before: it still filters the sidebar tabs
+    --   live as you type, just restyled and given the whole row.
+    local ADDR_LEFT = 12 + 96 + 10   -- past the nav-arrow toolbar group
     local searchHolder = titleBar:object("Frame", {
         Theme = { BackgroundColor3 = {"Secondary", 8} },
         BackgroundTransparency = 0.35,
-        AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, -14, 0.5, 0),
-        Size = UDim2.fromOffset(SEARCH_W, 30),
+        Position = UDim2.new(0, ADDR_LEFT, 0, TAB_ROW_HEIGHT + 5),
+        Size = UDim2.new(1, -(ADDR_LEFT + 14), 0, TOOLBAR_ROW_HEIGHT - 10),
         ZIndex = 4
     }):round(8):stroke({"Secondary", 20}, 1)
 
@@ -1864,18 +1907,11 @@ function Library:create(options)
         applySearch(searchBox.Text)
     end)
 
-    -- ----- Responsive title bar ----------------------------------------
-    --   On narrow windows the search box is the first thing to go, so the
-    --   title never gets squeezed into nothing.
-    local function reflow()
-        local w = core.AbsoluteSize.X
-        local compact = w < 560
-        searchHolder.Visible = not compact
-        local rightReserve = compact and 16 or (SEARCH_W + 28)
-        titleBlock.Size = UDim2.new(1, -(TITLE_LEFT + rightReserve), 1, 0)
-    end
-    core.AbsoluteObject:GetPropertyChangedSignal("AbsoluteSize"):Connect(reflow)
-    reflow()
+    -- Responsive title bar: no longer needed. The address bar now has
+    -- the whole of row 2 to itself (it doesn't compete with the title
+    -- for horizontal space), and the window's minimum width (480px,
+    -- see the resize handle below) already keeps it comfortably wide
+    -- at every allowed size.
 
     return mt
 end
@@ -1907,6 +1943,19 @@ function Library:tab(options)
         AutoButtonColor = false,
         ZIndex = 4
     }):round(8)
+
+    -- Selection border — hidden (Transparency 1) until the tab is active.
+    -- Kept as its own reference (not the shared :stroke() helper) so
+    -- setSelected() below can tween it independently of the background
+    -- fill; browsers ring the active tab/thumbnail rather than just
+    -- filling it, so this runs alongside the existing fill, not instead
+    -- of it.
+    local tabSelectStroke = tabButton:object("UIStroke", {
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        Thickness = 1.5,
+        Color = Library.CurrentTheme.Tertiary,
+        Transparency = 1
+    })
 
     -- Tab icon: detect the icon type so we can handle tinting correctly.
     -- Roblox renders Unicode emojis (🥚, 💰, 🌙 — anything from the
@@ -2053,10 +2102,12 @@ function Library:tab(options)
             tabButton:tween{BackgroundTransparency = 0.82, Length = 0.15}
             tintTarget:tween{[tintProp] = Library.CurrentTheme.Tertiary, Length = 0.15}
             tabLabel:tween{TextColor3 = Library.CurrentTheme.StrongText, Length = 0.15}
+            tabSelectStroke:tween{Transparency = 0.15, Length = 0.15}
         else
             tabButton:tween{BackgroundTransparency = 1, Length = 0.15}
             tintTarget:tween{[tintProp] = Library.CurrentTheme.WeakText, Length = 0.15}
             tabLabel:tween{TextColor3 = Library:lighten(Library.CurrentTheme.WeakText, 10), Length = 0.15}
+            tabSelectStroke:tween{Transparency = 1, Length = 0.15}
         end
     end
     setSelected(false)
@@ -2064,6 +2115,7 @@ function Library:tab(options)
     -- Re-apply colours when the theme changes (we already track `selectedTab`)
     table.insert(Library._themeUpdaters, function(theme)
         local isSel = (selectedTab == tabButton)
+        tabSelectStroke:tween{Color = theme.Tertiary, Length = 0.15}
         if isSel then
             tintTarget:tween{[tintProp] = theme.Tertiary, Length = 0.15}
             tabLabel:tween{TextColor3 = theme.StrongText, Length = 0.15}
