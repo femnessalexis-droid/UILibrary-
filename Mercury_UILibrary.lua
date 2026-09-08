@@ -817,8 +817,18 @@ function Library:create(options)
         BackgroundTransparency = 1,
         Position = UDim2.new(1, -14, 1, -30),
         Size = UDim2.new(0, 280, 1, -70),
-        ZIndex = 40,
-        ClipsDescendants = true -- backstop: clips any card that's ever wider than the holder again
+        ZIndex = 40
+        -- NOTE: previously had ClipsDescendants = true as a "backstop" in
+        -- case a card ever exceeded the holder's width. But the holder is
+        -- exactly NOTI_W (280) wide, while each card's drop shadow (see
+        -- _spawnNotification) is intentionally 36px WIDER than the card to
+        -- give it a soft blur margin. With clipping on, that side margin
+        -- got sliced off flush against the holder's edges, so only the
+        -- image's flat, un-blurred slice interior showed — a hard black
+        -- rectangle instead of a soft halo. Since NOTI_W is hardcoded to
+        -- match this holder's width by construction, a card can never
+        -- actually exceed it, so the backstop was never doing real work —
+        -- removing it lets the shadow bleed and look soft again.
     })
     notificationHolder:object("UIListLayout", {
         Padding = UDim.new(0, 10),
@@ -3077,16 +3087,26 @@ function Library:_spawnNotification(options)
         ZIndex = 101
     })
 
+    -- Uses the exact same asset + slice params as the window's own
+    -- drop shadow (see ~line 838) rather than the notification's old
+    -- one. The old asset id rendered as a hard black diagonal wedge
+    -- poking past the rounded corner once it actually became visible
+    -- (previously masked entirely by the clipping bug above) — swapping
+    -- to the asset already proven to look soft/correct on the window
+    -- fixes that outright instead of guessing at 9-slice numbers for an
+    -- asset we can't preview. The blur margin is also scaled down from
+    -- the window's +60 to +36, since a 280px-wide toast needs a much
+    -- subtler shadow than a full window does.
     local _shadow = noti:object("ImageLabel", {
         Centered = true,
-        Size = UDim2.new(1, 70, 1, 70),
+        Size = UDim2.new(1, 36, 1, 36),
         BackgroundTransparency = 1,
         ZIndex = 100,
-        Image = "rbxassetid://6014261993",
-        ImageColor3 = Color3.fromRGB(0, 0, 0),
+        Image = "rbxassetid://6015897843",
+        ImageColor3 = Color3.new(0, 0, 0),
         ImageTransparency = 1,
         ScaleType = Enum.ScaleType.Slice,
-        SliceCenter = Rect.new(49, 49, 450, 450)
+        SliceCenter = Rect.new(47, 47, 450, 450)
     })
 
     -- ───── Card — the visible surface. A TextButton so the whole card
@@ -3272,7 +3292,7 @@ function Library:_spawnNotification(options)
     end)
 
     -- ───── Entrance ─────
-    _shadow:tween{ImageTransparency = 0.55, Length = 0.3}
+    _shadow:tween{ImageTransparency = 0.78, Length = 0.3}
     card:tween{BackgroundTransparency = 0.05, Length = 0.3}
     cardStroke:tween{Transparency = 0.35, Length = 0.3}
     iconChip:tween{BackgroundTransparency = 0.88, Length = 0.25}
