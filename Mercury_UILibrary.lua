@@ -42,6 +42,36 @@
         they're parented to the window frame itself and inset above the
         resize grip so the stack never overlaps it.
 
+    Update 09/08 (2) — Notification overhaul:
+      • Fixed the messy/hard border: the old UIStroke never had its
+        Transparency animated, so it snapped in fully opaque a beat
+        before the card's own fill had faded in. It's now driven by
+        the same fade timeline as everything else on the card.
+      • Fixed the drop shadow silently never rendering: it lived inside
+        the same frame that had ClipsDescendants = true for the grow-in
+        animation, so it was clipped away on every notification. Split
+        into an unclipped outer wrapper (shadow) + inner clipped card
+        (fill/border/content) — the shadow is now actually visible.
+      • Fixed a double-fire bug: manually closing a notification before
+        its timer finished could let the timer's Completed event fire
+        `Callback` a second time. Guarded with a single `dismissed` flag.
+      • New Type option ("Info" / "Success" / "Warning" / "Error") — each
+        gets its own accent color, a left accent bar, and a tinted icon
+        chip. "Info" keeps the original bell icon so existing calls with
+        no Type look unchanged; the new types render a plain glyph so
+        they never depend on an unverified image asset ID.
+      • The whole card is now click-to-dismiss, not just the ✕ button.
+      • Hovering a notification pauses its countdown (Play/Pause on the
+        underlying tween) so it doesn't disappear out from under you
+        while you're reading it.
+      • The countdown bar no longer starts ticking until the card has
+        fully entered — previously it started shrinking in parallel with
+        the entrance tween, quietly eating into the advertised Duration.
+      • New queueing: at most `MaxNotifications` (default 4, override by
+        setting `Window.MaxNotifications`) show at once per window; a
+        burst beyond that queues and pops in as older ones clear, instead
+        of flooding the whole notification stack at once.
+
 ]]
 
 local TweenService     = game:GetService("TweenService")
@@ -2942,13 +2972,63 @@ end
 --                          NOTIFICATION
 -- =====================================================================
 
+-- Semantic notification types. Each maps to an accent color plus a
+-- fallback icon. "Info" keeps the exact original bell image so any
+-- existing call site that doesn't pass Type looks unchanged; the new
+-- types render as a plain text glyph instead of an image so they never
+-- depend on an image asset ID that hasn't actually been verified to
+-- exist. Colors are resolved at spawn time — a string resolves live
+-- against the current theme (and gets registered so it live-updates on
+-- a theme change), anything else is used as a fixed Color3.
+local NOTI_TYPES = {
+    Info    = { Color = "Tertiary",                     Image = "rbxassetid://8628681683" },
+    Success = { Color = Color3.fromRGB(74, 222, 128),    Glyph = "✓" },
+    Warning = { Color = Color3.fromRGB(250, 204, 21),    Glyph = "!" },
+    Error   = { Color = Color3.fromRGB(248, 113, 113),   Glyph = "✕" }
+}
+
 function Library:notification(options)
     options = self:set_defaults({
         Title    = "Notification",
         Text     = "Your character has been reset.",
         Duration = 4,
+        Type     = "Info",
         Callback = function() end
     }, options)
+
+    -- Simple per-window FIFO queue: only `MaxNotifications` cards are
+    -- ever alive inside a window's stack at once (default 4 — override
+    -- by setting e.g. `Window.MaxNotifications = 6`). A burst beyond
+    -- that waits its turn instead of flooding the whole stack, spilling
+    -- past the window, or piling into an unreadable wall of cards.
+    self._notifActive = self._notifActive or 0
+    self._notifQueue  = self._notifQueue  or {}
+    local maxVisible   = self.MaxNotifications or 4
+
+    if self._notifActive >= maxVisible then
+        table.insert(self._notifQueue, options)
+        return
+    end
+
+    self._notifActive = self._notifActive + 1
+    self:_spawnNotification(options)
+end
+
+-- Called whenever a card finishes closing — hands the slot to the next
+-- queued notification, if any.
+function Library:_advanceNotificationQueue()
+    self._notifActive = math.max(0, (self._notifActive or 1) - 1)
+    local nextOptions = self._notifQueue and table.remove(self._notifQueue, 1)
+    if nextOptions then
+        self._notifActive = self._notifActive + 1
+        self:_spawnNotification(nextOptions)
+    end
+end
+
+function Library:_spawnNotification(options)
+    local typeInfo    = NOTI_TYPES[options.Type] or NOTI_TYPES.Info
+    local themeLinked  = type(typeInfo.Color) == "string"
+    local accentColor  = themeLinked and Library.CurrentTheme[typeInfo.Color] or typeInfo.Color
 
     -- ───── Layout constants ─────
     -- NOTI_W matches notificationHolder's width (280, see line ~789) exactly —
@@ -2961,14 +3041,16 @@ function Library:notification(options)
     local PROGRESS_H   = 3     -- height of the bar at the very bottom
     local TITLE_H      = 20
     local TITLE_GAP    = 6
-    local ICON_SIZE    = 18
+    local ICON_CHIP    = 26    -- tinted icon "chip" behind the icon/glyph
+    local ACCENT_W     = 3     -- left color-coded accent bar
+    local CONTENT_X    = PAD_X + ICON_CHIP + 10   -- title/body left edge
 
     -- Pre-compute the wrapped text height with TextService so the
     -- notification's outer Size is known *before* the tween starts.
     -- (Reading TextBounds while Size = (1,0,0,0) gives 0 — that was the
     -- root cause of the progress bar overlapping the body text.)
     local TextService  = game:GetService("TextService")
-    local textWidth    = NOTI_W - (PAD_X * 2)
+    local textWidth    = NOTI_W - CONTENT_X - PAD_X
     local ok, computed = pcall(function()
         return TextService:GetTextSize(
             options.Text,
@@ -2983,14 +3065,17 @@ function Library:notification(options)
 
     local TOTAL_H = PAD_TOP + TITLE_H + TITLE_GAP + textHeight + PAD_BOTTOM + PROGRESS_H
 
-    -- ───── Outer frame ─────
+    -- ───── Outer wrapper — unclipped, hosts the drop shadow ─────
+    -- The shadow used to live inside the same frame that had
+    -- ClipsDescendants = true for the grow-in animation, so it was
+    -- clipped away completely and never actually rendered. It now
+    -- lives on this unclipped wrapper instead; the visible surface
+    -- (fill / border / content) moves to `card` below.
     local noti = self.notifs:object("Frame", {
         BackgroundTransparency = 1,
-        Theme = { BackgroundColor3 = "Secondary" },
         Size = UDim2.new(0, NOTI_W, 0, 0),
-        ZIndex = 101,
-        ClipsDescendants = true
-    }):round(10):stroke({"Secondary", 20}, 1)
+        ZIndex = 101
+    })
 
     local _shadow = noti:object("ImageLabel", {
         Centered = true,
@@ -3004,22 +3089,84 @@ function Library:notification(options)
         SliceCenter = Rect.new(49, 49, 450, 450)
     })
 
-    -- ───── Icon ─────
-    local icon = noti:object("ImageLabel", {
+    -- ───── Card — the visible surface. A TextButton so the whole card
+    -- (not just the ✕) can be clicked to dismiss early. ─────
+    local card = noti:object("TextButton", {
+        Size = UDim2.fromScale(1, 1),
+        Theme = { BackgroundColor3 = "Secondary" },
         BackgroundTransparency = 1,
-        ImageTransparency = 1,
-        Position = UDim2.fromOffset(PAD_X, PAD_TOP + 1),
-        Size = UDim2.fromOffset(ICON_SIZE, ICON_SIZE),
-        Image = "rbxassetid://8628681683",
-        Theme = { ImageColor3 = "Tertiary" },
-        ZIndex = 102
+        ClipsDescendants = true,
+        ZIndex = 101
+    }):round(12)
+
+    -- Border — built by hand (not the :stroke() shortcut) so we keep a
+    -- direct handle to tween its own Transparency. The old stroke never
+    -- had Transparency animated at all, so it snapped in fully opaque
+    -- a beat before the card's own fill had faded in — that mismatch is
+    -- what actually read as a messy/hard edge. It's registered into the
+    -- same live-theme table :stroke() would have used, so it still
+    -- follows a theme change.
+    local cardStroke = card:object("UIStroke", {
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        Thickness = 1,
+        Color = Library:lighten(Library.CurrentTheme.Secondary, 30),
+        Transparency = 1
     })
+    table.insert(Library.ThemeObjects.Secondary, {cardStroke, "Color", "Secondary", 30})
+
+    -- ───── Left accent bar — color-codes the Type at a glance. UICorner
+    -- + ClipsDescendants on `card` clips this to the same rounded shape,
+    -- so the top/bottom corners come out naturally rounded for free. ─────
+    local accentBarProps = {
+        Size = UDim2.new(0, ACCENT_W, 1, 0),
+        BackgroundTransparency = 1,
+        ZIndex = 102
+    }
+    if themeLinked then accentBarProps.Theme = { BackgroundColor3 = typeInfo.Color } end
+    local accentBar = card:object("Frame", accentBarProps)
+    if not themeLinked then accentBar.BackgroundColor3 = accentColor end
+
+    -- ───── Icon chip ─────
+    local iconChip = card:object("Frame", {
+        Position = UDim2.fromOffset(PAD_X, PAD_TOP),
+        Size = UDim2.fromOffset(ICON_CHIP, ICON_CHIP),
+        BackgroundColor3 = accentColor,
+        BackgroundTransparency = 1,
+        ZIndex = 102
+    }):round(8)
+
+    local icon
+    if typeInfo.Image then
+        icon = iconChip:object("ImageLabel", {
+            Centered = true,
+            Size = UDim2.fromOffset(14, 14),
+            BackgroundTransparency = 1,
+            ImageTransparency = 1,
+            Image = typeInfo.Image,
+            ImageColor3 = accentColor,
+            ZIndex = 103
+        })
+    else
+        icon = iconChip:object("TextLabel", {
+            Size = UDim2.fromScale(1, 1),
+            BackgroundTransparency = 1,
+            TextTransparency = 1,
+            Text = typeInfo.Glyph,
+            TextColor3 = accentColor,
+            TextSize = 14,
+            Font = Enum.Font.GothamBold,
+            TextXAlignment = Enum.TextXAlignment.Center,
+            TextYAlignment = Enum.TextYAlignment.Center,
+            ZIndex = 103
+        })
+    end
+    local iconTransparencyProp = typeInfo.Image and "ImageTransparency" or "TextTransparency"
 
     -- ───── Title ─────
-    local title = noti:object("TextLabel", {
+    local title = card:object("TextLabel", {
         BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(PAD_X + ICON_SIZE + 8, PAD_TOP),
-        Size = UDim2.new(1, -(PAD_X * 2 + ICON_SIZE + 8 + 20), 0, TITLE_H),
+        Position = UDim2.fromOffset(CONTENT_X, PAD_TOP),
+        Size = UDim2.new(1, -(CONTENT_X + PAD_X + 20), 0, TITLE_H),
         Font = Enum.Font.GothamBold,
         Text = options.Title,
         Theme = { TextColor3 = "StrongText" },
@@ -3031,7 +3178,7 @@ function Library:notification(options)
     })
 
     -- ───── Close button ─────
-    local exit = noti:object("ImageButton", {
+    local exit = card:object("ImageButton", {
         Image = "http://www.roblox.com/asset/?id=8497487650",
         AnchorPoint = Vector2.new(1, 0),
         Theme = { ImageColor3 = {"WeakText", 10} },
@@ -3039,15 +3186,17 @@ function Library:notification(options)
         Size = UDim2.fromOffset(12, 12),
         BackgroundTransparency = 1,
         ImageTransparency = 1,
-        ZIndex = 102
+        ZIndex = 104
     })
 
-    -- ───── Body text ─────
-    local text = noti:object("TextLabel", {
+    -- ───── Body text — indented to line up under the title, in its
+    -- own column next to the icon, instead of running full-width
+    -- underneath it. ─────
+    local text = card:object("TextLabel", {
         BackgroundTransparency = 1,
         Text = options.Text,
-        Position = UDim2.fromOffset(PAD_X, PAD_TOP + TITLE_H + TITLE_GAP),
-        Size = UDim2.new(1, -(PAD_X * 2), 0, textHeight),
+        Position = UDim2.fromOffset(CONTENT_X, PAD_TOP + TITLE_H + TITLE_GAP),
+        Size = UDim2.new(1, -(CONTENT_X + PAD_X), 0, textHeight),
         TextSize = 13,
         Font = Enum.Font.Gotham,
         TextTransparency = 1,
@@ -3059,7 +3208,7 @@ function Library:notification(options)
     })
 
     -- ───── Progress bar (anchored to the absolute bottom) ─────
-    local durHolder = noti:object("Frame", {
+    local durHolder = card:object("Frame", {
         BackgroundTransparency = 1,
         Theme = { BackgroundColor3 = {"Secondary", 25} },
         AnchorPoint = Vector2.new(0, 1),
@@ -3068,42 +3217,81 @@ function Library:notification(options)
         ZIndex = 102
     }):round(100)
 
-    local lengthBar = durHolder:object("Frame", {
+    local lengthBarProps = {
         BackgroundTransparency = 1,
-        Theme = { BackgroundColor3 = "Tertiary" },
         Size = UDim2.fromScale(1, 1)
-    }):round(100)
+    }
+    if themeLinked then lengthBarProps.Theme = { BackgroundColor3 = typeInfo.Color } end
+    local lengthBar = durHolder:object("Frame", lengthBarProps):round(100)
+    if not themeLinked then lengthBar.BackgroundColor3 = accentColor end
 
-    -- ───── Animations ─────
+    -- ───── Lifecycle ─────
+    local dismissed = false
+    local barTween   -- the countdown tween; also doubles as a pause handle
+
     local fadeOut
     fadeOut = function()
+        -- Guards against the old double-fire bug: closing a card early
+        -- (click / ✕) while its countdown tween was still alive let that
+        -- tween's Completed event fire fadeOut (and Callback) a second
+        -- time once it finished running out in the background.
+        if dismissed then return end
+        dismissed = true
+        if barTween then barTween:Cancel() end
+
         task.delay(0.3, function()
             if noti.AbsoluteObject then noti.AbsoluteObject:Destroy() end
             task.spawn(options.Callback)
+            self:_advanceNotificationQueue()
         end)
-        icon:tween{ImageTransparency = 1, Length = 0.2}
+        icon:tween{[iconTransparencyProp] = 1, Length = 0.2}
         exit:tween{ImageTransparency = 1, Length = 0.2}
+        iconChip:tween{BackgroundTransparency = 1, Length = 0.2}
+        accentBar:tween{BackgroundTransparency = 1, Length = 0.2}
+        cardStroke:tween{Transparency = 1, Length = 0.2}
         durHolder:tween{BackgroundTransparency = 1, Length = 0.2}
         lengthBar:tween{BackgroundTransparency = 1, Length = 0.2}
         text:tween{TextTransparency = 1, Length = 0.2}
         title:tween{TextTransparency = 1, Length = 0.2, Style = Enum.EasingStyle.Quad}
         _shadow:tween{ImageTransparency = 1, Length = 0.2}
-        noti:tween{BackgroundTransparency = 1, Length = 0.2, Size = UDim2.fromOffset(NOTI_W, 0)}
+        card:tween{BackgroundTransparency = 1, Length = 0.2}
+        noti:tween{Size = UDim2.fromOffset(NOTI_W, 0), Length = 0.2}
     end
 
     exit.MouseButton1Click:Connect(fadeOut)
+    card.MouseButton1Click:Connect(fadeOut) -- click anywhere on the card to dismiss early
 
-    _shadow:tween{ImageTransparency = 0.55, Length = 0.25}
-    noti:tween({BackgroundTransparency = 0.05, Size = UDim2.fromOffset(NOTI_W, TOTAL_H), Length = 0.25}, function()
-        icon:tween{ImageTransparency = 0, Length = 0.2}
-        exit:tween{ImageTransparency = 0.4, Length = 0.2}
-        durHolder:tween{BackgroundTransparency = 0.4, Length = 0.2}
-        lengthBar:tween{BackgroundTransparency = 0, Length = 0.2}
-        text:tween{TextTransparency = 0, Length = 0.2}
-        title:tween{TextTransparency = 0, Length = 0.2}
+    -- Hovering pauses the countdown so a notification can't disappear
+    -- out from under you mid-read; leaving resumes it from where it
+    -- left off (Play() on an already-progressed Tween resumes it).
+    card.MouseEnter:Connect(function()
+        if not dismissed and barTween then barTween:Pause() end
+    end)
+    card.MouseLeave:Connect(function()
+        if not dismissed and barTween then barTween:Play() end
     end)
 
-    lengthBar:tween({Size = UDim2.fromScale(0, 1), Length = options.Duration, Style = Enum.EasingStyle.Linear}, fadeOut)
+    -- ───── Entrance ─────
+    _shadow:tween{ImageTransparency = 0.55, Length = 0.3}
+    card:tween{BackgroundTransparency = 0.05, Length = 0.3}
+    cardStroke:tween{Transparency = 0.35, Length = 0.3}
+    iconChip:tween{BackgroundTransparency = 0.88, Length = 0.25}
+    accentBar:tween{BackgroundTransparency = 0, Length = 0.25}
+    icon:tween{[iconTransparencyProp] = 0, Length = 0.25}
+    exit:tween{ImageTransparency = 0.4, Length = 0.25}
+    durHolder:tween{BackgroundTransparency = 0.4, Length = 0.25}
+    lengthBar:tween{BackgroundTransparency = 0, Length = 0.25}
+    text:tween{TextTransparency = 0, Length = 0.25}
+    title:tween{TextTransparency = 0, Length = 0.25}
+
+    -- The countdown only starts once the card has actually finished
+    -- growing in — previously it started shrinking in parallel with the
+    -- entrance tween, so part of the advertised Duration silently
+    -- ticked away before the card was even fully visible.
+    noti:tween({Size = UDim2.fromOffset(NOTI_W, TOTAL_H), Length = 0.3, Style = Enum.EasingStyle.Quint}, function()
+        if dismissed then return end
+        barTween = lengthBar:tween({Size = UDim2.fromScale(0, 1), Length = options.Duration, Style = Enum.EasingStyle.Linear}, fadeOut)
+    end)
 end
 
 -- =====================================================================
