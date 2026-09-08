@@ -787,7 +787,8 @@ function Library:create(options)
         BackgroundTransparency = 1,
         Position = UDim2.new(1, -14, 1, -30),
         Size = UDim2.new(0, 280, 1, -70),
-        ZIndex = 40
+        ZIndex = 40,
+        ClipsDescendants = true -- backstop: clips any card that's ever wider than the holder again
     })
     notificationHolder:object("UIListLayout", {
         Padding = UDim.new(0, 10),
@@ -2950,7 +2951,10 @@ function Library:notification(options)
     }, options)
 
     -- ───── Layout constants ─────
-    local NOTI_W       = 320
+    -- NOTI_W matches notificationHolder's width (280, see line ~789) exactly —
+    -- it was previously 320, wider than the holder itself, which is what
+    -- caused cards to visibly spill past the window's edge.
+    local NOTI_W       = 280
     local PAD_X        = 14
     local PAD_TOP      = 12
     local PAD_BOTTOM   = 14    -- gap above the progress bar
